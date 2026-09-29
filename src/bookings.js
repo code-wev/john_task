@@ -60,6 +60,7 @@ async function checkEligibility() {
 export async function createBooking(db, input) {
   const { slotId, name, email } = validateInput(input);
 
+  // Check that the slot exists before any async work.
   const slot = db.prepare(`
     SELECT id, remaining
     FROM slots
@@ -70,44 +71,67 @@ export async function createBooking(db, input) {
     throw new HttpError(404, "Appointment not found.");
   }
 
+  // Early exit when already full (avoids unnecessary eligibility call).
   if (slot.remaining <= 0) {
     throw new HttpError(409, "This appointment is fully booked.");
   }
 
+  // Async eligibility check runs before the transaction so the
+  // database write-lock is held for the shortest possible time.
   const eligible = await checkEligibility();
 
   if (!eligible) {
     throw new HttpError(403, "This booking cannot be accepted.");
   }
 
-  const booking = {
-    id: randomUUID(),
-    slotId,
-    createdAt: new Date().toISOString()
-  };
+  // BEGIN IMMEDIATE acquires a reserved lock right away, so concurrent
+  // writers are serialised by SQLite even across separate processes.
+  db.exec("BEGIN IMMEDIATE");
 
-  db.prepare(`
-    INSERT INTO bookings (
-      id,
-      slot_id,
-      resident_name,
-      resident_email,
-      created_at
-    )
-    VALUES (?, ?, ?, ?, ?)
-  `).run(
-    booking.id,
-    slotId,
-    name,
-    email,
-    booking.createdAt
-  );
+  try {
+    // Atomically decrement remaining only when capacity is available.
+    // If another request already claimed the last place, changes() is 0.
+    const updateResult = db.prepare(`
+      UPDATE slots
+      SET remaining = remaining - 1
+      WHERE id = ? AND remaining > 0
+    `).run(slotId);
 
-  db.prepare(`
-    UPDATE slots
-    SET remaining = remaining - 1
-    WHERE id = ?
-  `).run(slotId);
+    if (updateResult.changes === 0) {
+      db.exec("ROLLBACK");
+      throw new HttpError(409, "This appointment is fully booked.");
+    }
 
-  return booking;
+    const booking = {
+      id: randomUUID(),
+      slotId,
+      createdAt: new Date().toISOString()
+    };
+
+    db.prepare(`
+      INSERT INTO bookings (
+        id,
+        slot_id,
+        resident_name,
+        resident_email,
+        created_at
+      )
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      booking.id,
+      slotId,
+      name,
+      email,
+      booking.createdAt
+    );
+
+    db.exec("COMMIT");
+
+    return booking;
+  } catch (error) {
+    // Rollback only if the transaction is still active (i.e. error was
+    // not the 409 we threw above, which already rolled back).
+    try { db.exec("ROLLBACK"); } catch { /* already rolled back */ }
+    throw error;
+  }
 }
