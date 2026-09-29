@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Civic appointments — assessment demo</title>
+  <style>
+    body {
+      font: 16px/1.5 system-ui, sans-serif;
+      margin: 0;
+      background: #f4f6f8;
+      color: #17202a;
+    }
+
+    main {
+      max-width: 760px;
+      margin: 32px auto;
+      padding: 24px;
+      background: white;
+      border-radius: 12px;
+    }
+
+    label {
+      display: block;
+      margin-top: 16px;
+      font-weight: 600;
+    }
+
+    input, select, button {
+      box-sizing: border-box;
+      width: 100%;
+      padding: 12px;
+      margin-top: 6px;
+      font: inherit;
+    }
+
+    button {
+      margin-top: 20px;
+      border: 0;
+      border-radius: 6px;
+      background: #174ea6;
+      color: white;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
+    :focus-visible {
+      outline: 3px solid #a43b00;
+      outline-offset: 3px;
+    }
+
+    .notice {
+      padding: 12px;
+      background: #fff3cd;
+    }
+
+    #message {
+      min-height: 24px;
+      font-weight: 600;
+    }
+
+    li {
+      margin-bottom: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    @media (max-width: 600px) {
+      main {
+        margin: 0;
+        border-radius: 0;
+        padding: 16px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Book a public-service appointment</h1>
+
+    <p class="notice">
+      Fictional hiring assessment. Use synthetic information only.
+      The staff view is an unsecured local demo.
+    </p>
+
+    <form id="booking-form">
+      <label for="service">Service</label>
+      <select id="service" required></select>
+
+      <label for="slot">Appointment</label>
+      <select id="slot" required></select>
+
+      <label for="name">Resident name</label>
+      <input id="name" maxlength="120" required>
+
+      <label for="email">Email address</label>
+      <input id="email" type="email" maxlength="254" required>
+
+      <button id="submit" type="submit">Confirm appointment</button>
+    </form>
+
+    <p id="message" role="status" aria-live="polite"></p>
+
+    <hr>
+
+    <h2>Demo staff view</h2>
+    <button id="refresh" type="button">Refresh booking list</button>
+    <p id="staff-message" role="status"></p>
+    <ul id="bookings"></ul>
+  </main>
+
+  <script type="module">
+    const get = (id) => document.getElementById(id);
+
+    async function api(path, options) {
+      const response = await fetch(path, options);
+      const data = await response.json();
+
+      if (!response.ok) {
+        const error = new Error(data.error || "Request failed.");
+        error.status = response.status;
+        throw error;
+      }
+
+      return data;
+    }
+
+    async function loadSlots() {
+      get("slot").replaceChildren();
+
+      const serviceId = encodeURIComponent(get("service").value);
+      const slots = await api(
+        `/api/slots?serviceId=${serviceId}`
+      );
+
+      const available = slots.filter((slot) => slot.remaining > 0);
+
+      if (available.length === 0) {
+        get("slot").add(new Option("No appointments available", ""));
+        return;
+      }
+
+      for (const slot of available) {
+        const date = new Date(slot.startsAt).toLocaleString();
+        const label = `${date} — ${slot.remaining} available`;
+
+        get("slot").add(new Option(label, slot.id));
+      }
+    }
+
+    async function loadBookings() {
+      get("staff-message").textContent = "Loading bookings…";
+
+      try {
+        const bookings = await api("/api/staff/bookings");
+        get("bookings").replaceChildren();
+
+        for (const booking of bookings) {
+          const item = document.createElement("li");
+
+          item.textContent = [
+            booking.serviceName,
+            booking.residentName,
+            booking.residentEmail,
+            new Date(booking.startsAt).toLocaleString(),
+            booking.id
+          ].join(" — ");
+
+          get("bookings").append(item);
+        }
+
+        get("staff-message").textContent = bookings.length
+          ? `${bookings.length} booking(s).`
+          : "No bookings yet.";
+      } catch (error) {
+        get("staff-message").textContent = error.message;
+      }
+    }
+
+    get("service").addEventListener("change", async () => {
+      try {
+        await loadSlots();
+      } catch (error) {
+        get("message").textContent = error.message;
+      }
+    });
+
+    get("refresh").addEventListener("click", loadBookings);
+
+    get("booking-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+
+      get("submit").disabled = true;
+      get("message").textContent = "Submitting booking…";
+
+      try {
+        const booking = await api("/api/bookings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            slotId: get("slot").value,
+            name: get("name").value,
+            email: get("email").value
+          })
+        });
+
+        get("message").textContent =
+          `Confirmed. Booking reference: ${booking.id}`;
+
+        await Promise.all([loadSlots(), loadBookings()]);
+      } catch {
+        get("message").textContent =
+          "Booking failed. Please try again.";
+      } finally {
+        get("submit").disabled = false;
+      }
+    });
+
+    async function initialize() {
+      try {
+        const services = await api("/api/services");
+
+        for (const service of services) {
+          get("service").add(new Option(service.name, service.id));
+        }
+
+        await loadSlots();
+        await loadBookings();
+      } catch (error) {
+        get("message").textContent = error.message;
+      }
+    }
+
+    initialize();
+  </script>
+</body>
+</html>
